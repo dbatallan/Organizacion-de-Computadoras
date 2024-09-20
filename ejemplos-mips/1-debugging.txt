@@ -1,0 +1,55 @@
+Otras herramientas que puede llegar a ser útiles, son
+los programas ktrace/kdump/ktruss [1], que sirven para
+inspeccionar la interacción entre nuestro programa, y
+el sistema operativo.
+
+Para esto, podemos usar ktruss para ver las lista de
+todas las llamadas al sistema realizadas por esa corrida
+del programa:
+
+$ cc -g -Wall -o 01-holamundo 01-holamundo.S
+$ ktruss -tc 01-holamundo
+Hola mundo.
+   552 ktruss   emul(netbsd)
+   552 ktruss   fcntl(0x4, 0x3, 0)                 = 1, 1
+   552 ktruss   fcntl(0x4, 0x4, 0x1)               = 0, 1
+   552 01-holamundo emul(netbsd)
+   552 01-holamundo execve("./01-holamundo", 0x7fffd9e0, 0x7fffd9e8) JUSTRETURN
+   552 01-holamundo mmap(0, 0x8000, 0x3, 0x1002, 0xffffffff, 0, 0, 0) = 0x7dfa7000
+   552 01-holamundo open("/etc/ld.so.conf", 0, 0x7dfbc25c) Err#2 ENOENT
+   552 01-holamundo open("/usr/lib/libc.so.12", 0, 0x7dfaa089) = 3, 2113572864
+   552 01-holamundo __fstat13(0x3, 0x7fffd5dc)     = 0, 2113572864
+   552 01-holamundo mmap(0, 0x1000, 0x1, 0x1, 0x3, 0, 0, 0) = 0x7dfa6000
+   552 01-holamundo munmap(0x7dfa6000, 0x1000)     = 0
+   552 01-holamundo mmap(0, 0x153000, 0x5, 0x10000002, 0x3, 0, 0, 0) = 0x7de50000
+   552 01-holamundo mmap(0x7df8d000, 0x7000, 0x3, 0x12, 0x3, 0, 0xfd000, 0) = 0x7df8d000
+   552 01-holamundo mmap(0x7df94000, 0xf000, 0x3, 0x1012, 0xffffffff, 0, 0, 0) = 0x7df94000
+   552 01-holamundo mprotect(0x7df4d000, 0x40000, 0) = 0, 1040384
+   552 01-holamundo close(0x3)                     = 0
+   552 01-holamundo write(0x1, 0x400d80, 0xc)      = 12, -1
+       "Hola mundo.\n"
+   552 01-holamundo exit(0)
+
+En particular, nos interesa inspeccionar los argumentos de
+la llamada a write(2). Podemos evitar interferencias filtrando
+la salida anterior con grep:
+
+$  ktruss -tc ./01-holamundo 2>&1 | grep write.0x1
+   583 01-holamundo write(0x1, 0x400d80, 0xc)      = 12, -1
+
+También, podemos inspeccionar el puntero pasado en el segundo
+argumento de write():
+
+$ ktruss -m 16 -tci 01-holamundo
+   626 ktruss   fcntl(0x4, 0x3, 0)                 = 1, 1
+Hola mundo.
+   ...
+   626 01-holamundo write(0x1, 0x400d80, 0xc)      = 12, -1
+       "Hola mundo.\n"
+   626 01-holamundo exit(0)
+
+Saludos,
+Leandro
+
+[1] http://netbsd.gw.com/cgi-bin/man-cgi?ktrace++NetBSD-current
+    http://netbsd.gw.com/cgi-bin/man-cgi?kdump+1+NetBSD-current

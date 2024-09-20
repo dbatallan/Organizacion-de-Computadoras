@@ -1,0 +1,334 @@
+Supongamos el siguiente programa:
+
+$ perl -lne 'printf "%02d %s\n", ++$i, $_;' < 01-holamundo.S
+01 # Similar a 00-holamundo.S (imprime un mensaje por salida
+02 # estándar, usando write(2)); pero, en este caso, vamos a
+03 # calcular dinámicamente la longitud del string impreso.
+04 #
+05 # Para esto, escribimos un método, mystrlen(), que opera sobre
+06 # un string, calculando y retornando, su longitud.
+07 #
+08 # Además, y debido a que este programa hace llamadas a código
+09 # en funciones, deberemos respetar la ABI usada en el sistema.
+10 #
+11 # $Date: 2008/10/10 20:27:32 $
+12
+13 #include <mips/regdef.h>
+14 #include <sys/syscall.h>
+15
+16      .text
+17      .align  2
+18
+19      .globl  main
+20      .ent    main
+21 main:
+22      .frame  $fp, 32, ra
+23      .set    noreorder
+24      .cpload t9
+25      .set    reorder
+26      subu    sp, sp, 32
+27      .cprestore 20
+28      sw      ra,  28(sp)
+29      sw      $fp, 24(sp)
+30      move    $fp, sp
+31
+32      # Calculamos la longitud del string.
+33      #
+34      la      a0, msg
+35      jal     mystrlen
+36      sw      v0, 8(sp)
+37
+38      # Llamamos a write(2) para imprimir, ignorando el valor
+39      # de retorno, y notando que los registros se preservan
+40      # al cruzar la interfaz de llamadas al sistema, algo que
+41         # no ocurre en el caso de llamadas a procedimientos.
+42      #
+43      li      v0, SYS_write # ver dentro de <sys/syscall.h>.
+44      li      a0, 1         # a0: standard output file descriptor.
+45      la      a1, msg       # a1: data pointer.
+46      lw      a2, 8(sp)     # a2: longitud, según mystrlen().
+47      syscall
+48
+49      # Volvemos al sistema operativo, devolviendo un código
+50      # de retorno nulo.
+51      #
+52      move    v0, zero
+53      lw      ra,  28(sp)
+54      lw      $fp, 24(sp)
+55      addu    sp, sp, 32
+56      j       ra
+57      .end    main
+58
+59      .ent    mystrlen
+60 mystrlen:
+61      .frame  $fp, 16, ra
+62      .set    noreorder
+63      .cpload t9
+64      .set    reorder
+65      subu    sp, sp, 16
+66      .cprestore 0
+67      sw      $fp, 4(sp)
+68      move    $fp, sp
+69
+70      # Use v0 for the result.
+71      #
+72      li      v0, 0
+73 mystrlen_loop:
+74      lw      t0, 0(a0)
+75      beqz    t0, mystrlen_return
+76      addiu   a0, a0, 1
+77      addiu   v0, v0, 1
+78      j       mystrlen_loop
+79
+80 mystrlen_return:
+81      # Destruimos el frame.
+82      #
+83      lw      $fp, 4(sp)
+84      addu    sp, sp, 16
+85
+86      # Retorno.
+87      #
+88      j       ra
+89      .end    mystrlen
+90
+91      .rdata
+92 msg:
+93      .asciiz "Hola mundo.\n"
+
+La idea de este programa, es imprimir la cadena de la línea
+número 93 por salida estándar. Para esto, va a enviar esta
+informacíón usando el syscall write. A su vez, esto hace que
+el programa necesite calcular la longitud de la cadena, para
+poder decirle a write() cuántos bytes de información enviar:
+ésto se hace con la función mystrlen(), en la línea 60.
+
+Cuando compilamos, e intentamos correr este programa, vemos
+que en vez de imprimir, se cuelga:
+
+$ cc -g -Wall -o 01-holamundo 01-holamundo.S
+$ 01-holamundo
+Segmentation fault (core dumped)
+
+(Notar que estamos compilando con -g, para agregar toda la
+informacion de debugging que vamos a necesitar más adelante).
+
+Entonces, vamos a intentar correr este programa nuevamente, 
+esta vez con un debugger:
+
+$ gdb 01-holamundo
+...
+(gdb) run
+Starting program: /root/6620/clases/mips_assembly/01-holamundo
+
+Program received signal SIGSEGV, Segmentation fault.
+mystrlen_loop () at 01-holamundo.S:74
+74              lw      t0, 0(a0)
+Current language:  auto; currently asm
+
+Según lo que dice el debugger, el programa se colgó en la
+línea 74 del archivo 01-holamundo.S:
+
+(gdb) list
+69
+70              # Use v0 for the result.
+71              #
+72              li      v0, 0
+73      mystrlen_loop:
+74              lw      t0, 0(a0)
+75              beqz    t0, mystrlen_return
+76              addiu   a0, a0, 1
+77              addiu   v0, v0, 1
+78              j       mystrlen_loop
+
+Para ver el porqué del pinchazo, podemos ver dónde apunta el 
+registro $a0:
+
+(gdb) print (char *) $a0
+$1 = 0x400d81 "ola mundo.\n"
+(gdb) print $a0
+$2 = 4197761
+
+Ahi esta el problema: el puntero almacenado en $a0, no tiene
+las condiciones de alineamiento impuestas por la instrucción
+lw (i.e., la dirección debería ser múltiplo entero de 4).
+
+Además, podemos ver que la instrucción correcta sería lb, no
+lw, ya que el programa necesita ir leyendo de a 1 caracter, y
+poder asi calcular la longitud de la cadena.
+
+Luego de reemplazar lw por lb en la línea 74, podemos intentar
+volver a compilar y correr el programa:
+
+$ cc -g -Wall -o 01-holamundo 01-holamundo.S
+$ 01-holamundo
+Hola mundo.
+
+(Esta vez, parece haber funcionado). Nuevamente, podemos usar
+el debugger para verificar el funcionamiento del programa paso
+a paso: vamos a decirle que, una vez arrancado el programa, 
+detenga la ejecución en la primera instrucción de mystrlen:
+
+$ gdb 01-holamundo
+...
+(gdb) break mystrlen
+Breakpoint 1 at 0x400b94: file 01-holamundo.S, line 63.
+(gdb) run
+Starting program: /root/6620/clases/mips_assembly/01-holamundo
+
+Breakpoint 1, mystrlen () at 01-holamundo.S:72
+72              li      v0, 0
+Current language:  auto; currently asm
+(gdb) list
+67              sw      $fp, 4(sp)
+68              move    $fp, sp
+69
+70              # Use v0 for the result.
+71              #
+72              li      v0, 0
+73      mystrlen_loop:
+74              lb      t0, 0(a0)
+75              beqz    t0, mystrlen_return
+76              addiu   a0, a0, 1
+
+Según esto, el programa está detenido en la línea número 70,
+justo antes de inicializar el registro $v0. Ahora, avanzamos 
+una instrucción y vemos que el resultado sea correcto:
+
+(gdb) stepi
+mystrlen_loop () at 01-holamundo.S:74
+74              lb      t0, 0(a0)
+(gdb) print $v0
+$1 = 0
+
+También podemos ver el registro $v0 (entre otros) mediante el
+siguiente comando:
+
+(gdb) info registers
+          zero       at       v0       v1       a0       a1       a2       a3
+ R0   00000000 7dfa15d8 00000000 ffffffff 00400d80 7fffd9d4 7fffd9dc 7dfa13c8
+            t0       t1       t2       t3       t4       t5       t6       t7
+ R8   7de50000 000c7328 00000018 0000000c 00000007 00000007 00000002 00000001
+            s0       s1       s2       s3       s4       s5       s6       s7
+ R16  7fffda88 7fffd9d0 00000001 7fffd9d4 7fffeff0 7dfb44cc 7dfa9000 00000000
+            t8       t9       k0       k1       gp       sp       s8       ra
+ R24  00000011 00400b78 00000000 00000000 10008030 7fffd960 7fffd960 00400b40
+            sr       lo       hi      bad    cause       pc
+      0008ff3c 0000d0d7 000002d1 00400b94 00000024 00400b98
+           fsr      fir       fp
+      00000000 00000000 00000000
+
+Continuamos avanzando hasta cargar el primer caracter de la
+cadena, y luego inspeccionamos el valor leído:
+
+(gdb) stepi
+0x00400b9c      74              lb      t0, 0(a0)
+(gdb) print (char) $t0
+$2 = 72 'H'
+(gdb) stepi
+75              beqz    t0, mystrlen_return
+(gdb) stepi
+76              addiu   a0, a0, 1
+(gdb) stepi
+77              addiu   v0, v0, 1
+(gdb) stepi
+74              lb      t0, 0(a0)
+(gdb) stepi
+0x00400b9c      74              lb      t0, 0(a0)
+(gdb) print (char) $t0
+$3 = 111 'o'
+
+Y así sucesivamente. Luego, podemos ver de colocar un nuevo 
+breakpoint justo en el punto de retorno de mystrlen(), para
+poder verificar el valor de retorno de la función:
+
+(gdb) break 88
+Breakpoint 2 at 0x400bbc: file 01-holamundo.S, line 88.
+(gdb) list 88
+83              lw      $fp, 4(sp)
+84              addu    sp, sp, 16
+85
+86              # Retorno.
+87              #
+88              j       ra
+89              .end    mystrlen
+90
+91              .rdata
+92      msg:
+
+Para evitar detenernos antes del retorno, vamos a desactivar
+el breakpoint anterior:
+
+(gdb) info breakpoints
+Num Type           Disp Enb Address    What
+1   breakpoint     keep y   0x00400b94 01-holamundo.S:63
+        breakpoint already hit 1 time
+2   breakpoint     keep y   0x00400bbc 01-holamundo.S:88
+(gdb) disable 1
+
+Ahora podemos continuar con la ejecución:
+
+(gdb) continue
+Continuing.
+
+Program received signal SIGTRAP, Trace/breakpoint trap.
+mystrlen_return () at 01-holamundo.S:84
+84              addu    sp, sp, 16
+(gdb) print $v0
+$4 = 12
+
+Notar que la longitud calculada es 12, lo cual es correcto,
+ya que incluye el caracter LF que se encuentra al final de
+la cadena msg.
+
+Ahora, podemos seguir avanzando algunas instrucciones
+más, para verificar que los argumentos del syscall estén bien:
+
+(gdb) stepi
+0x00400b40 in main () at 01-holamundo.S:35
+35              jal     mystrlen
+(gdb) stepi
+36              sw      v0, 8(sp)
+(gdb) stepi
+43              li      v0, SYS_write # ver dentro de <sys/syscall.h>.
+(gdb)
+44              li      a0, 1         # a0: standard output file descriptor.
+(gdb)
+45              la      a1, msg       # a1: data pointer.
+(gdb)
+0x00400b54      45              la      a1, msg       # a1: data pointer.
+(gdb) stepi
+0x00400b58      45              la      a1, msg       # a1: data pointer.
+(gdb)
+46              lw      a2, 8(sp)     # a2: longitud, según mystrlen().
+(gdb)
+47              syscall
+(gdb) p $a0
+$5 = 1
+(gdb) print (char *) $a1
+$6 = 0x400d80 "Hola mundo.\n"
+(gdb) print (long) $a2
+$7 = 12
+
+Finalmente, veamos los registros del procesador justo en el
+punto de retorno de la llamada al sistema:
+
+(gdb) stepi
+Hola mundo.
+52              move    v0, zero
+(gdb) info registers
+          zero       at       v0       v1       a0       a1       a2       a3
+ R0   00000000 7dfa15d8 0000000c ffffffff 00000001 00400d80 0000000c 00000000
+            t0       t1       t2       t3       t4       t5       t6       t7
+ R8   00000000 000c7328 00000018 0000000c 00000007 00000007 00000002 00000001
+            s0       s1       s2       s3       s4       s5       s6       s7
+ R16  7fffda88 7fffd9d0 00000001 7fffd9d4 7fffeff0 7dfb44cc 7dfa9000 00000000
+            t8       t9       k0       k1       gp       sp       s8       ra
+ R24  00000011 00400b78 00000000 00000000 10008030 7fffd970 7fffd970 00400b40
+            sr       lo       hi      bad    cause       pc
+      0008ff3c 0000d0d7 000002d1 c007bc00 00000024 00400b64
+           fsr      fir       fp
+      00000000 00000000 00000000
+
+(Notar que $a3 es 0, indicando que no hubo error, y $v0 contiene el
+valos de retorno de la llamada, 0xc, que se corresponde con la 
+cantidad de bytes que acabamos de escribir en el file descriptor).
